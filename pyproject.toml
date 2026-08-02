@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gdv-node-agent"
+version = "0.1.0"
+description = "GDV Node Agent — MCP-native management-plane daemon for the GDV agentic orchestrator (BP-001 / ADR-002)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary — Green Data Ventures" }
+authors = [{ name = "Green Data Ventures" }]
+
+dependencies = [
+    "fastmcp>=3.3.1",
+    "uvicorn>=0.30",
+    "starlette>=0.37",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+gdv-node-agent = "gdv_node_agent.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"gdv_node_agent.plugins" = ["**/manifest.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Put the repo root on sys.path so `from tests.conftest import ...` resolves
+# regardless of how pytest is invoked (`pytest` console script vs `python -m pytest`).
+pythonpath = ["."]
+asyncio_mode = "auto"
+# Local-only tests (T6/T7) need the Tailscale mesh + the target host and are
+# skipped in CI. Run them from the Mac during the local deploy phase:
+#   pytest -m local
+markers = [
+    "local: requires the Tailscale mesh / target host; run in the local deploy phase, not in CI",
+]
+addopts = "-m 'not local'"
