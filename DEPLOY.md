@@ -48,7 +48,11 @@ What it does (see `deploy/bootstrap.sh`): installs packages → creates the
 least-privilege **`nodeagent`** user → clones + venv-installs the agent →
 generates the bearer **token** (`/etc/gdv-node-agent/token`, `root:nodeagent`,
 `0640`) → writes the **scoped sudoers** (`/etc/sudoers.d/gdv-node-agent`, only
-the systemctl/journalctl verbs the agent needs) → installs the **systemd unit**.
+the systemctl/journalctl verbs the agent needs) → installs the **systemd unit** →
+creates the separate unprivileged **`hermes`** workload user and installs the
+**`hermes-install`** provisioning unit (installed, not enabled — the agent starts
+it on demand in Step 7). It resolves a Python **≥3.11** interpreter (so it works on
+Ubuntu 24.04, which ships 3.12, not 3.11).
 
 ---
 
@@ -138,8 +142,9 @@ pytest -m local -v
 ```
 
 - **T7** (`ping` through the remote MCP over Tailscale) should pass immediately.
-- **T6** calls `hermes.install` then checks `hermes --version` reports `0.19.1`.
-  You can also do T6 conversationally in Claude Desktop (Step 7).
+- **T6** calls `hermes.install` (which triggers the `hermes-install` oneshot) and
+  asserts the returned `version_ok` / `version == 0.19.1` (provenance from the
+  unit's journal). You can also do T6 conversationally in Claude Desktop (Step 7).
 
 ---
 
@@ -147,9 +152,15 @@ pytest -m local -v
 
 Now the payoff — no more SSH paste. In Claude Desktop, drive the agent's tools:
 
-1. **Hermes** — call `hermes.install` (idempotent; runs
-   `curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`, pinned
-   `0.19.1`). Verify with `run_command("hermes --version")`.
+1. **Hermes** — call `hermes.install`. The agent does **not** run the installer in
+   its own sandbox; it starts the hardened `hermes-install` oneshot, which
+   provisions Hermes `0.19.1` as the **separate, unprivileged `hermes` user** into
+   `/var/lib/hermes` from a **sha256-pinned, verified** installer (ADR-002). The
+   tool returns `{active, version, version_ok}` (version read from the unit's
+   journal — the agent can't exec the workload). Watch it with
+   `tail_logs("hermes-install")`. Then configure Hermes' API keys **on the host**
+   (`sudo -u hermes hermes setup`, or edit `/var/lib/hermes/.hermes/.env`) — never
+   through chat. `hermes.upgrade` re-runs the provisioner after you bump the pin.
 2. **LiteLLM** — put the provider keys on the host (never through chat), drop the
    `litellm.config.yaml` from the Stage A starter, create a `litellm` systemd
    unit, then manage it with `litellm.control("start")` / `("status")`.

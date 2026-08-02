@@ -1,42 +1,57 @@
-"""The ``hermes`` plugin — install and manage Hermes + LiteLLM through the agent.
+"""The ``hermes`` plugin — provision and manage Hermes + LiteLLM through the agent.
 
-This is the first per-workload capability module (ADR-002 §2 / BP-001 Step 5).
-It brings the verbs the orchestrator needs to stand Hermes up on a node:
+Design (ADR-002): the control plane (this agent, running as ``nodeagent``) does
+NOT host the workload. Hermes is provisioned and run under its OWN identity
+(user ``hermes``, state ``/var/lib/hermes``) by the hardened ``hermes-install``
+systemd oneshot (see ``deploy/hermes-install.service`` + ``deploy/hermes-provision.sh``).
+The agent only ORCHESTRATES that unit through the same scoped, audited
+``service_control`` primitive it uses for every other unit — it never runs an
+unauthenticated ``curl | bash`` inside its own sandbox, and by design cannot even
+read the workload's files. Version provenance therefore comes from the unit's own
+journal, not from exec'ing the workload binary.
 
-  * ``hermes.install``  — idempotent install of the pinned Hermes release
-  * ``hermes.upgrade``  — re-run the installer to move to the current release
-  * ``hermes.restart``  — restart the Hermes systemd unit
+Verbs:
+  * ``hermes.install``  — ensure Hermes is provisioned (start the oneshot; idempotent)
+  * ``hermes.upgrade``  — re-run the provisioner to move to a newly-pinned release
+  * ``hermes.restart``  — restart the Hermes gateway unit (after ``hermes gateway install``)
   * ``litellm.control`` — start/stop/restart/status the LiteLLM unit
   * ``hermes.skills_pr_status`` — surface the skills-as-git PR queue
 
 Every tool drives the host through the :class:`PluginContext` primitives, so all
-host commands go through the same **audited, destructive-blocked** path as the
-base ``run_command`` — the plugin never touches ``subprocess`` directly.
+host actions go through the same **audited, scoped** path as the base tools — the
+plugin never touches ``subprocess`` directly.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-# Pinned per EL-02 / the task ground truth. Upgrades bump this deliberately.
+# Pinned per EL-02 / the task ground truth. MUST match hermes-install.service's
+# HERMES_EXPECTED_VERSION. Upgrades bump this (and the unit's pin) deliberately.
 HERMES_VERSION = "0.19.1"
-HERMES_INSTALL_CMD = (
-    "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
-)
-# Installer pulls uv/Python/Node/ripgrep/ffmpeg — allow a generous timeout.
-INSTALL_TIMEOUT_S = 900
+# The hardened oneshot that provisions Hermes under the `hermes` workload user.
+PROVISION_UNIT = "hermes-install"
 
 _LITELLM_ACTIONS = {"start", "stop", "restart", "status"}
+_VERSION_RE = re.compile(r"\b(\d+\.\d+\.\d+)\b")
 
 
-def _installed_version(ctx) -> str | None:
-    """Return the installed Hermes version string, or None if not installed."""
-    res = ctx.run_command("hermes --version", timeout_s=30)
-    if "error" in res or res.get("exit_code") != 0:
+def _provisioned_version(ctx) -> str | None:
+    """Parse the provisioner's journal for the version it last reported.
+
+    The agent cannot exec the workload binary (separate identity + 0750 state),
+    so version provenance comes from the unit's audited logs, not ``hermes --version``.
+    """
+    res = ctx.tail_logs(PROVISION_UNIT, lines=200)
+    if not isinstance(res, dict) or "error" in res:
         return None
-    # `hermes --version` prints e.g. "hermes 0.19.1" or "0.19.1"
-    out = (res.get("stdout") or "").strip()
-    return out.split()[-1] if out else None
+    for line in reversed(res.get("lines", []) or []):
+        if "provisioned OK" in line or "already present" in line:
+            m = _VERSION_RE.search(line)
+            if m:
+                return m.group(1)
+    return None
 
 
 def register(mcp, ctx) -> None:
@@ -44,48 +59,50 @@ def register(mcp, ctx) -> None:
 
     @mcp.tool(name="hermes.install")
     def hermes_install() -> dict[str, Any]:
-        """Install Hermes (pinned) if absent. Idempotent — skips if already present."""
-        current = _installed_version(ctx)
-        if current == HERMES_VERSION:
-            return {"status": "already-installed", "version": current}
+        """Ensure Hermes is provisioned (pinned) under its workload identity.
 
-        res = ctx.run_command(HERMES_INSTALL_CMD, timeout_s=INSTALL_TIMEOUT_S)
+        Triggers the hardened ``hermes-install`` oneshot via scoped systemctl and
+        reports whether it is active. Idempotent — the oneshot skips if the pinned
+        version is already present.
+        """
+        res = ctx.service_control(PROVISION_UNIT, "start")
         if "error" in res:
             return {"status": "error", "error": res["error"]}
-        if res.get("exit_code") != 0:
-            return {
-                "status": "error",
-                "exit_code": res.get("exit_code"),
-                "stderr": res.get("stderr", ""),
-            }
-
-        installed = _installed_version(ctx)
+        active = bool(res.get("active"))
+        version = _provisioned_version(ctx)
         return {
-            "status": "installed" if current is None else "reinstalled",
-            "version": installed,
+            "status": "provisioned" if active else "failed",
+            "unit": PROVISION_UNIT,
+            "active": active,
+            "version": version,
             "expected": HERMES_VERSION,
-            "version_ok": installed == HERMES_VERSION,
+            "version_ok": version == HERMES_VERSION,
         }
 
     @mcp.tool(name="hermes.upgrade")
     def hermes_upgrade() -> dict[str, Any]:
-        """Re-run the Hermes installer to move to the current pinned release."""
-        before = _installed_version(ctx)
-        res = ctx.run_command(HERMES_INSTALL_CMD, timeout_s=INSTALL_TIMEOUT_S)
+        """Re-run the provisioner (restart the oneshot) to move to the pinned release.
+
+        Bump the pin in ``hermes-install.service`` first; this reinstalls to match.
+        """
+        before = _provisioned_version(ctx)
+        res = ctx.service_control(PROVISION_UNIT, "restart")
         if "error" in res:
             return {"status": "error", "error": res["error"]}
-        if res.get("exit_code") != 0:
-            return {
-                "status": "error",
-                "exit_code": res.get("exit_code"),
-                "stderr": res.get("stderr", ""),
-            }
-        after = _installed_version(ctx)
-        return {"status": "upgraded", "from": before, "to": after}
+        active = bool(res.get("active"))
+        after = _provisioned_version(ctx)
+        return {
+            "status": "upgraded" if active else "failed",
+            "unit": PROVISION_UNIT,
+            "active": active,
+            "from": before,
+            "to": after,
+            "expected": HERMES_VERSION,
+        }
 
     @mcp.tool(name="hermes.restart")
     def hermes_restart() -> dict[str, Any]:
-        """Restart the Hermes systemd unit."""
+        """Restart the Hermes gateway systemd unit (after ``hermes gateway install``)."""
         return ctx.service_control("hermes", "restart")
 
     @mcp.tool(name="litellm.control")

@@ -17,7 +17,11 @@ A small, always-on [FastMCP](https://github.com/jlowin/fastmcp) server (Python
 3.11) speaking **remote streamable-HTTP/SSE** (D-24), **bound to the Tailscale
 interface only** (never public). It exposes generic host-management primitives
 plus a **signed-plugin** seam; the first plugin (`hermes`) installs and manages
-Hermes + LiteLLM.
+Hermes + LiteLLM. The control plane never *hosts* the workload: Hermes is
+provisioned and run under its **own unprivileged identity** (`hermes`, state in
+`/var/lib/hermes`) by a separately-hardened `hermes-install` systemd oneshot that
+the agent only *orchestrates* via scoped `systemctl` — no `curl | bash` in the
+agent's sandbox, and the installer is **sha256-pinned and verified** before it runs.
 
 ### Base tools
 
@@ -91,7 +95,7 @@ DEPLOY.md           # local-phase runbook (run from the Tailscale-connected Mac)
 | `GDV_AGENT_AUDIT_LOG` | `/var/log/gdv-node-agent/audit.jsonl` | audit sink |
 | `GDV_AGENT_READ_ROOTS` | `/etc:/var/log:/opt:/home:/tmp` | `read_file` scope |
 | `GDV_AGENT_WRITE_ROOTS` | `/opt:/tmp` | `write_file` scope |
-| `GDV_AGENT_SERVICE_UNITS` | `hermes:litellm:gdv-node-agent` | `service_control`/`tail_logs` allowlist |
+| `GDV_AGENT_SERVICE_UNITS` | `hermes-install:hermes:litellm:gdv-node-agent` | `service_control`/`tail_logs` allowlist |
 | `GDV_AGENT_COMMAND_ALLOWLIST` | *(empty)* | optional positive allowlist for `run_command` |
 | `GDV_AGENT_PLUGIN_ALLOWLIST` | `hermes` | plugins permitted to load |
 

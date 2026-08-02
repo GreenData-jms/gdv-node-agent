@@ -33,28 +33,41 @@ class FakeMCP:
 
 
 class FakeCtx:
-    def __init__(self):
+    """Fakes the PluginContext primitives the plugin orchestrates through.
+
+    The plugin never execs the workload; it drives the ``hermes-install`` unit via
+    ``service_control`` and reads the version back from ``tail_logs`` (the journal).
+    """
+
+    def __init__(self, active=True, journal_version="0.19.1"):
         self.commands = []
         self.services = []
-        self.version_output = "hermes 0.19.1"
-        self.installed = True
+        self.active = active
+        self.journal_version = journal_version
 
     def run_command(self, cmd, timeout_s=60):
         self.commands.append(cmd)
-        if cmd == "hermes --version":
-            if not self.installed:
-                return {"error": "hermes: command not found"}
-            return {"exit_code": 0, "stdout": self.version_output, "stderr": ""}
         return {"exit_code": 0, "stdout": "", "stderr": ""}
 
     def service_control(self, unit, action):
         self.services.append((unit, action))
-        return {"unit": unit, "action": action, "active": True}
+        return {"unit": unit, "action": action, "active": self.active}
+
+    def tail_logs(self, unit, lines=200):
+        if self.journal_version is None:
+            return {"unit": unit, "lines": []}
+        return {
+            "unit": unit,
+            "lines": [
+                "[hermes-provision] provisioning hermes into /var/lib/hermes",
+                f"[hermes-provision] hermes {self.journal_version} provisioned OK",
+            ],
+        }
 
 
-def _register():
+def _register(**ctx_kwargs):
     mcp = FakeMCP()
-    ctx = FakeCtx()
+    ctx = FakeCtx(**ctx_kwargs)
     hermes_plugin.register(mcp, ctx)
     return mcp, ctx
 
@@ -70,33 +83,33 @@ def test_registers_expected_tools():
     }
 
 
-def test_install_idempotent_when_present():
+def test_install_orchestrates_provision_unit():
     mcp, ctx = _register()
-    ctx.installed = True
     out = mcp.tools["hermes.install"]()
-    assert out == {"status": "already-installed", "version": "0.19.1"}
-    # must NOT have run the installer
-    assert hermes_plugin.HERMES_INSTALL_CMD not in ctx.commands
+    # It triggers the provisioning oneshot — never curl|bash / exec in-sandbox.
+    assert ("hermes-install", "start") in ctx.services
+    assert ctx.commands == []
+    assert out["status"] == "provisioned"
+    assert out["active"] is True
+    assert out["version"] == "0.19.1"
+    assert out["version_ok"] is True
 
 
-def test_install_runs_when_absent():
+def test_install_reports_failure_when_unit_inactive():
+    mcp, ctx = _register(active=False, journal_version=None)
+    out = mcp.tools["hermes.install"]()
+    assert ("hermes-install", "start") in ctx.services
+    assert out["status"] == "failed"
+    assert out["active"] is False
+    assert out["version_ok"] is False
+
+
+def test_upgrade_restarts_provision_unit():
     mcp, ctx = _register()
-    ctx.installed = False
-
-    calls = {"n": 0}
-    orig = ctx.run_command
-
-    def run(cmd, timeout_s=60):
-        calls["n"] += 1
-        # first version probe: absent; after installer: present
-        if cmd == "hermes --version" and calls["n"] > 1:
-            ctx.installed = True
-        return orig(cmd, timeout_s)
-
-    ctx.run_command = run
-    out = mcp.tools["hermes.install"]()
-    assert out["status"] == "installed"
-    assert hermes_plugin.HERMES_INSTALL_CMD in ctx.commands
+    out = mcp.tools["hermes.upgrade"]()
+    assert ("hermes-install", "restart") in ctx.services
+    assert out["status"] == "upgraded"
+    assert out["to"] == "0.19.1"
 
 
 def test_litellm_control_validates_action():
