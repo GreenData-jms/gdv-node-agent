@@ -20,7 +20,7 @@ DEFAULT_AUDIT_LOG = "/var/log/gdv-node-agent/audit.jsonl"
 # Conservative default scopes for file/service tools. Overridable via env.
 DEFAULT_READ_ROOTS = ["/etc", "/var/log", "/opt", "/home", "/tmp"]
 DEFAULT_WRITE_ROOTS = ["/opt", "/tmp"]
-DEFAULT_SERVICE_UNITS = ["hermes", "litellm", "gdv-node-agent"]
+DEFAULT_SERVICE_UNITS = ["hermes-install", "hermes", "litellm", "gdv-node-agent"]
 
 
 def _split(value: str | None) -> list[str]:
