@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets — NEVER commit the agent auth token or provider keys
+*.token
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# Local audit logs
+audit.jsonl
+*.log
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
