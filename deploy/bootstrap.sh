@@ -33,7 +33,19 @@ REPO_REF="${REPO_REF:-main}"
 CONFIG_DIR="/etc/gdv-node-agent"
 TOKEN_FILE="${CONFIG_DIR}/token"
 AUDIT_DIR="/var/log/gdv-node-agent"
-UNITS="${GDV_AGENT_SERVICE_UNITS:-hermes:litellm:gdv-node-agent}"
+# `hermes-install` is the provisioning oneshot the agent triggers via scoped sudo
+# (see deploy/hermes-install.service). Listing it here wires it into BOTH the
+# scoped sudoers and the agent's service allowlist (GDV_AGENT_SERVICE_UNITS).
+UNITS="${GDV_AGENT_SERVICE_UNITS:-hermes-install:hermes:litellm:gdv-node-agent}"
+
+# Hermes workload (installed/run under its OWN identity, never the agent's — ADR-002).
+HERMES_USER="${HERMES_USER:-hermes}"
+HERMES_STATE="${HERMES_STATE:-/var/lib/hermes}"
+HERMES_VERSION="${HERMES_VERSION:-0.19.1}"
+HERMES_INSTALLER_URL="${HERMES_INSTALLER_URL:-https://hermes-agent.nousresearch.com/install.sh}"
+# Pinned sha256 of the installer — verified before execution (supply-chain gate).
+# Bump deliberately alongside HERMES_VERSION when moving to a new release.
+HERMES_INSTALLER_SHA256="${HERMES_INSTALLER_SHA256:-45f589461248c7a6ec3aecd7522a69dd49c5c8dbf4798ba1296af5c0c5e7ccd3}"
 
 log()  { printf '\033[1;32m[bootstrap]\033[0m %s\n' "$*"; }
 skip() { printf '\033[1;33m[bootstrap] skip:\033[0m %s\n' "$*"; }
@@ -50,16 +62,46 @@ fi
 [[ -n "$AGENT_HOST" ]] || die "set GDV_AGENT_HOST to the box's Tailscale 100.x IP (agent refuses non-Tailscale bind)"
 
 # --------------------------------------------------------------------------- #
-# 1. packages
+# 1. packages + a usable Python (>=3.11) with venv/ensurepip
 # --------------------------------------------------------------------------- #
-if ! command -v python3.11 >/dev/null 2>&1; then
-  log "installing packages (python3.11, venv, git, curl)"
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y -qq python3.11 python3.11-venv python3-pip git curl ca-certificates sudo
+export DEBIAN_FRONTEND=noninteractive
+_apt_updated=""
+apt_install() {
+  [[ -n "$_apt_updated" ]] || { apt-get update -qq; _apt_updated=1; }
+  apt-get install -y -qq "$@"
+}
+
+if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+  log "installing base packages (git, curl, ca-certificates, sudo)"
+  apt_install git curl ca-certificates sudo
 else
-  skip "python3.11 present"
+  skip "git + curl present"
 fi
+
+# Resolve an interpreter >=3.11. Ubuntu 24.04 ships 3.12 and has NO python3.11 in
+# its default repos, so we do NOT hard-pin 3.11 — we take the newest suitable one
+# and make sure its venv/ensurepip package is installed (Ubuntu splits it out).
+pick_python() {
+  local c
+  for c in python3.13 python3.12 python3.11 python3; do
+    command -v "$c" >/dev/null 2>&1 || continue
+    "$c" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 11) else 1)' \
+      2>/dev/null && { echo "$c"; return 0; }
+  done
+  return 1
+}
+PYTHON_BIN="$(pick_python || true)"
+if [[ -z "$PYTHON_BIN" ]]; then
+  log "no interpreter >=3.11 found; installing python3.12"
+  apt_install python3.12 python3.12-venv
+  PYTHON_BIN=python3.12
+fi
+if ! "$PYTHON_BIN" -c 'import ensurepip' >/dev/null 2>&1; then
+  pyver="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+  log "installing ${PYTHON_BIN}-venv (ensurepip missing)"
+  apt_install "python${pyver}-venv" || apt_install python3-venv
+fi
+log "using interpreter: $("$PYTHON_BIN" --version 2>&1) (${PYTHON_BIN})"
 
 # --------------------------------------------------------------------------- #
 # 2. least-privilege user
@@ -70,6 +112,17 @@ if ! id "$AGENT_USER" >/dev/null 2>&1; then
           --shell /usr/sbin/nologin "$AGENT_USER"
 else
   skip "user ${AGENT_USER} exists"
+fi
+
+# Hermes workload identity — SEPARATE from the agent (ADR-002). The control plane
+# never hosts the workload; Hermes installs/runs as this user into its own state
+# dir (${HERMES_STATE}, created + owned 0750 by the unit's StateDirectory). We do
+# not --create-home: systemd owns the state dir.
+if ! id "$HERMES_USER" >/dev/null 2>&1; then
+  log "creating workload user ${HERMES_USER}"
+  useradd --system --home-dir "$HERMES_STATE" --shell /usr/sbin/nologin "$HERMES_USER"
+else
+  skip "user ${HERMES_USER} exists"
 fi
 
 # --------------------------------------------------------------------------- #
@@ -90,7 +143,7 @@ fi
 # --------------------------------------------------------------------------- #
 if [[ ! -x "${AGENT_HOME}/.venv/bin/gdv-node-agent" ]]; then
   log "creating venv + installing agent"
-  python3.11 -m venv "${AGENT_HOME}/.venv"
+  "$PYTHON_BIN" -m venv "${AGENT_HOME}/.venv"
   "${AGENT_HOME}/.venv/bin/pip" install --quiet --upgrade pip
   "${AGENT_HOME}/.venv/bin/pip" install --quiet "${AGENT_HOME}"
 else
@@ -158,6 +211,19 @@ sed -e "s|@AGENT_USER@|${AGENT_USER}|g" \
     -e "s|@AUDIT_DIR@|${AUDIT_DIR}|g" \
     -e "s|@UNITS@|${UNITS}|g" \
     "${AGENT_HOME}/deploy/gdv-node-agent.service" > /etc/systemd/system/gdv-node-agent.service
+
+# --------------------------------------------------------------------------- #
+# 8. hermes provisioning unit — workload identity; the agent triggers it via
+#    scoped `sudo systemctl start hermes-install`. Installed but NOT enabled:
+#    provisioning is agent-driven ("install THROUGH the agent"), not at boot.
+# --------------------------------------------------------------------------- #
+log "installing hermes-install unit (workload provisioner)"
+sed -e "s|@HERMES_USER@|${HERMES_USER}|g" \
+    -e "s|@AGENT_HOME@|${AGENT_HOME}|g" \
+    -e "s|@HERMES_INSTALLER_URL@|${HERMES_INSTALLER_URL}|g" \
+    -e "s|@HERMES_INSTALLER_SHA256@|${HERMES_INSTALLER_SHA256}|g" \
+    -e "s|@HERMES_VERSION@|${HERMES_VERSION}|g" \
+    "${AGENT_HOME}/deploy/hermes-install.service" > /etc/systemd/system/hermes-install.service
 
 systemctl daemon-reload
 systemctl enable gdv-node-agent >/dev/null 2>&1 || true
