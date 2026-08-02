@@ -31,14 +31,19 @@ def _client():
 
 @pytest.mark.asyncio
 async def test_t6_hermes_install_present():
-    """T6 — after hermes.install, `hermes --version` reports 0.19.1 via run_command."""
+    """T6 — hermes.install provisions Hermes 0.19.1 under its own workload unit.
+
+    The agent orchestrates the hardened ``hermes-install`` oneshot (it cannot exec
+    the workload binary — separate identity + 0750 state), so we assert on the
+    tool's return, whose version provenance comes from the unit's journal.
+    """
     client = _client()
     async with client:
-        # Install through the agent (idempotent; skips if already present).
-        await client.call_tool("hermes.install", {})
-        res = await client.call_tool("run_command", {"cmd": "hermes --version"})
+        res = await client.call_tool("hermes.install", {})
         data = res.data if hasattr(res, "data") else res
-        assert "0.19.1" in str(data)
+        assert data.get("active") is True, data
+        assert data.get("version") == "0.19.1", data
+        assert data.get("version_ok") is True, data
 
 
 @pytest.mark.asyncio

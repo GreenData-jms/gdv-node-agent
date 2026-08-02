@@ -1,0 +1,62 @@
+# hermes-install.service — provision Hermes under its OWN workload identity.
+#
+# This is the "install THROUGH the agent" seam done right (ADR-002): the control
+# plane (gdv-node-agent, user `nodeagent`) does NOT host the workload. Instead it
+# triggers THIS oneshot via scoped `sudo systemctl start hermes-install`, and the
+# install runs as the unprivileged `hermes` user into its own StateDirectory
+# (/var/lib/hermes) — separate identity, separate filesystem, independently
+# hardened. Compromising the agent does not hand over Hermes' data, and vice versa.
+#
+# The bootstrap renders @PLACEHOLDERS@ from its env (see deploy/bootstrap.sh).
+# Type=oneshot + RemainAfterExit=yes → after a successful install the unit reads
+# as `active`, so the agent's service_control("hermes-install","start") is a clean,
+# idempotent "ensure provisioned". `restart` re-runs the (idempotent) provisioner
+# to move to a newly-pinned version (hermes.upgrade).
+
+[Unit]
+Description=Provision Hermes (pinned, checksum-verified) under the hermes workload identity
+Documentation=https://github.com/GreenData-jms/gdv-node-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=@HERMES_USER@
+Group=@HERMES_USER@
+
+# Dedicated writable state: /var/lib/hermes, owned by hermes, 0750. This is the
+# ONLY writable location — %S is the state root (/var/lib).
+StateDirectory=hermes
+StateDirectoryMode=0750
+WorkingDirectory=%S/hermes
+Environment=HOME=%S/hermes
+Environment=HERMES_HOME=%S/hermes/.hermes
+Environment=HERMES_INSTALL_DIR=%S/hermes/hermes-agent
+Environment=HERMES_INSTALLER_URL=@HERMES_INSTALLER_URL@
+Environment=HERMES_INSTALLER_SHA256=@HERMES_INSTALLER_SHA256@
+Environment=HERMES_EXPECTED_VERSION=@HERMES_VERSION@
+Environment=HERMES_SKIP_BROWSER=1
+
+# The provisioner ships with the agent (read-only /opt); it only WRITES into
+# %S/hermes. Verified-then-executed, pinned by sha256 (see hermes-provision.sh).
+ExecStart=/bin/bash @AGENT_HOME@/deploy/hermes-provision.sh
+
+# --- hardening: this unit only needs the network + its own state dir ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+ReadWritePaths=%S/hermes
+
+# The installer pulls uv/Python/Node — give it room and don't kill mid-download.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
