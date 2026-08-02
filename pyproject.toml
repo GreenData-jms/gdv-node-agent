@@ -34,6 +34,9 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put the repo root on sys.path so `from tests.conftest import ...` resolves
+# regardless of how pytest is invoked (`pytest` console script vs `python -m pytest`).
+pythonpath = ["."]
 asyncio_mode = "auto"
 # Local-only tests (T6/T7) need the Tailscale mesh + the target host and are
 # skipped in CI. Run them from the Mac during the local deploy phase:
