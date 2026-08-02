@@ -1,0 +1,42 @@
+[Unit]
+Description=GDV Node Agent (MCP management-plane daemon)
+Documentation=https://github.com/GreenData-jms/gdv-node-agent
+# Prefer the Tailscale interface to be up before we bind to the 100.x address.
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@AGENT_USER@
+Group=@AGENT_USER@
+WorkingDirectory=@AGENT_HOME@
+
+# --- configuration (secrets come from the token FILE, never the unit) ---
+Environment=GDV_AGENT_HOST=@AGENT_HOST@
+Environment=GDV_AGENT_PORT=@AGENT_PORT@
+Environment=GDV_AGENT_MCP_PATH=@AGENT_PATH@
+Environment=GDV_AGENT_TOKEN_FILE=@TOKEN_FILE@
+Environment=GDV_AGENT_AUDIT_LOG=@AUDIT_DIR@/audit.jsonl
+Environment=GDV_AGENT_SERVICE_UNITS=@UNITS@
+Environment=GDV_AGENT_USE_SUDO=1
+
+ExecStart=@AGENT_HOME@/.venv/bin/gdv-node-agent
+
+Restart=on-failure
+RestartSec=3
+
+# --- hardening: it holds the exec primitive; give it the least it needs ---
+NoNewPrivileges=false
+# ^ must be false so the scoped `sudo systemctl` calls work; sudoers is the gate.
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# The agent writes only its audit log outside its home.
+ReadWritePaths=@AUDIT_DIR@
+
+[Install]
+WantedBy=multi-user.target

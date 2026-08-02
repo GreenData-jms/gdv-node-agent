@@ -168,7 +168,7 @@ def service_control(
     if action != "status":
         try:
             subprocess.run(
-                ["systemctl", action, unit],
+                [*config.sudo_prefix, "systemctl", action, unit],
                 capture_output=True, text=True, timeout=30,
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -178,7 +178,7 @@ def service_control(
             )
             return {"error": str(exc)}
 
-    active = _is_active(unit)
+    active = _is_active(unit, config)
     audit.record(
         tool="service_control", args={"unit": unit, "action": action},
         outcome="ok", active=active,
@@ -186,10 +186,10 @@ def service_control(
     return {"unit": unit, "action": action, "active": active}
 
 
-def _is_active(unit: str) -> bool:
+def _is_active(unit: str, config: Config) -> bool:
     try:
         proc = subprocess.run(
-            ["systemctl", "is-active", unit],
+            [*config.sudo_prefix, "systemctl", "is-active", unit],
             capture_output=True, text=True, timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
@@ -207,7 +207,7 @@ def tail_logs(unit: str, lines: int = 200, *, config: Config) -> dict[str, Any]:
         lines = 200
     try:
         proc = subprocess.run(
-            ["journalctl", "-u", unit, "-n", str(lines), "--no-pager"],
+            [*config.sudo_prefix, "journalctl", "-u", unit, "-n", str(lines), "--no-pager"],
             capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.SubprocessError) as exc:
