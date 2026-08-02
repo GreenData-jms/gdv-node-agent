@@ -35,7 +35,7 @@ async def test_t6_hermes_install_present():
     client = _client()
     async with client:
         # Install through the agent (idempotent; skips if already present).
-        await client.call_tool("hermes_install", {})
+        await client.call_tool("hermes.install", {})
         res = await client.call_tool("run_command", {"cmd": "hermes --version"})
         data = res.data if hasattr(res, "data") else res
         assert "0.19.1" in str(data)

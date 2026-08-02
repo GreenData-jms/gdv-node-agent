@@ -43,6 +43,14 @@ class Config:
     command_allowlist: list[str] = field(default_factory=list)
     plugins_dir: str = ""
     plugin_allowlist: list[str] = field(default_factory=list)
+    # When the agent runs as the non-root `nodeagent` user (production), systemd
+    # unit control and journalctl need scoped sudo. The bootstrap writes a
+    # NOPASSWD sudoers entry for exactly these commands and sets GDV_AGENT_USE_SUDO=1.
+    use_sudo: bool = False
+
+    @property
+    def sudo_prefix(self) -> list[str]:
+        return ["sudo", "-n"] if self.use_sudo else []
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Config":
@@ -67,6 +75,7 @@ class Config:
             command_allowlist=_split(env.get("GDV_AGENT_COMMAND_ALLOWLIST")),
             plugins_dir=env.get("GDV_AGENT_PLUGINS_DIR", default_plugins_dir),
             plugin_allowlist=_split(env.get("GDV_AGENT_PLUGIN_ALLOWLIST")) or ["hermes"],
+            use_sudo=env.get("GDV_AGENT_USE_SUDO", "").lower() in {"1", "true", "yes"},
         )
 
 

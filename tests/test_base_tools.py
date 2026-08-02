@@ -99,6 +99,16 @@ def test_service_control_restart(config, audit, fake_subprocess):
     assert out == {"unit": "hermes", "action": "restart", "active": True}
 
 
+def test_service_control_uses_sudo_prefix_when_configured(config, audit, fake_subprocess):
+    config.use_sudo = True
+    fake_subprocess.result = FakeCompleted(0, "active", "")
+    bt.service_control("hermes", "restart", config=config, audit=audit)
+    # every systemctl invocation must be prefixed with `sudo -n`
+    for (args, _kwargs) in fake_subprocess.calls:
+        argv = args[0]
+        assert argv[:3] == ["sudo", "-n", "systemctl"], argv
+
+
 # --- tail_logs ------------------------------------------------------------- #
 def test_tail_logs_allowlist(config):
     out = bt.tail_logs("nginx", config=config)

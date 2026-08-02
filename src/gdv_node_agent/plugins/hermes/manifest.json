@@ -1,0 +1,8 @@
+{
+  "name": "hermes",
+  "version": "0.1.0",
+  "entrypoint": "plugin.py",
+  "files": {
+    "plugin.py": "ebc250f20c9276eac6cd00822a8277a961d6c3d95fec8135d373251bcad9f88b"
+  }
+}
